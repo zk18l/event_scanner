@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Event Check-In Scanner</title>
+  <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, Roboto, Arial, sans-serif;
+      background: #111;
+      color: #fff;
+      margin: 0;
+      padding: 16px;
+      text-align: center;
+    }
+    h2 { margin: 8px 0 16px; font-size: 20px; }
+    #reader {
+      width: 100%;
+      max-width: 420px;
+      margin: 0 auto;
+      border-radius: 12px;
+      overflow: hidden;
+      background: #222;
+    }
+    #result {
+      margin-top: 20px;
+      padding: 16px;
+      border-radius: 10px;
+      font-size: 18px;
+      min-height: 60px;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+    }
+    .success { background: #1e7e34; }
+    .error { background: #b02a37; }
+    .idle { background: #333; color: #ccc; }
+
+    #scan-again, #start-camera {
+      margin-top: 14px;
+      padding: 12px 24px;
+      font-size: 16px;
+      font-weight: bold;
+      border: none;
+      border-radius: 8px;
+      background: #007bff;
+      color: #fff;
+      cursor: pointer;
+    }
+    #scan-again { display: none; }
+    #start-camera { margin-bottom: 15px; }
+
+    #camera-select {
+      margin-bottom: 12px;
+      padding: 8px;
+      font-size: 15px;
+      border-radius: 6px;
+      display: none;
+      max-width: 90%;
+    }
+
+    .name { font-weight: bold; font-size: 22px; color: #fff; }
+    .seat { margin-top: 4px; font-size: 16px; opacity: 0.9; }
+    .hint { font-size: 13px; color: #999; margin-top: 10px; max-width: 380px; margin-left: auto; margin-right: auto; }
+  </style>
+</head>
+<body>
+
+  <h2>🎟️ Event Check-In</h2>
+
+  <button id="start-camera" onclick="startScanner()">Start Camera</button>
+  <select id="camera-select" onchange="switchCamera()"></select>
+
+  <div id="reader"></div>
+  <div id="result" class="idle">Tap "Start Camera" to begin</div>
+  <button id="scan-again" onclick="restartScanner()">Scan Next Guest</button>
+  <div id="hint" class="hint"></div>
+
+  <script>
+    // ⚠️ REPLACE THIS with your deployed Apps Script Web App URL
+    // (Deploy → Manage deployments → copy the URL ending in /exec)
+    const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbxMs9jmHk_QxVixC-PDQdWzSnnp2B5YflxZReuMHrYKy64Z5De3HTrjVYjTtvRLXN26qQ/exec";
+
+    let html5QrCode;
+    let isProcessing = false;
+    let availableCameras = [];
+    let currentCameraId = null;
+
+    function onScanSuccess(decodedText) {
+      if (isProcessing) return;
+      isProcessing = true;
+
+      if (html5QrCode.getState() === Html5QrcodeScannerState.SCANNING) {
+        html5QrCode.pause();
+      }
+
+      setResult("idle", "⏳ Checking code...");
+      checkInWithServer(decodedText);
+    }
+
+    // Calls the Apps Script API via a plain GET request.
+    // GET avoids CORS preflight issues entirely, unlike POST.
+    function checkInWithServer(scannedId) {
+      const url = APPS_SCRIPT_URL + "?id=" + encodeURIComponent(scannedId);
+
+      fetch(url)
+        .then(res => res.json())
+        .then(onCheckInResult)
+        .catch(onServerError);
+    }
+
+    function onCheckInResult(response) {
+      if (response.status === "success") {
+        setResult(
+          "success",
+          `✅ Welcome, <span class="name">${escapeHtml(response.name)}</span>` +
+          `<div class="seat">Seat: ${escapeHtml(String(response.seat))}</div>`
+        );
+      } else {
+        setResult("error", `❌ ${escapeHtml(response.message)}`);
+      }
+      document.getElementById("scan-again").style.display = "inline-block";
+    }
+
+    function onServerError(err) {
+      console.error(err);
+      setResult("error", "❌ Server error. Check your connection and try again.");
+      document.getElementById("scan-again").style.display = "inline-block";
+    }
+
+    function setResult(cls, html) {
+      const el = document.getElementById("result");
+      el.className = cls;
+      el.innerHTML = html;
+    }
+
+    function setHint(text) {
+      document.getElementById("hint").textContent = text;
+    }
+
+    function restartScanner() {
+      isProcessing = false;
+      document.getElementById("scan-again").style.display = "none";
+      setResult("idle", "Point camera at a QR code");
+      if (html5QrCode && html5QrCode.getState() === Html5QrcodeScannerState.PAUSED) {
+        html5QrCode.resume();
+      }
+    }
+
+    function escapeHtml(str) {
+      const div = document.createElement("div");
+      div.textContent = str;
+      return div.innerHTML;
+    }
+
+    function onScanFailure() {
+      // ignore continuous no-QR-in-frame errors
+    }
+
+    function pickDefaultCamera(cameras) {
+      const backCam = cameras.find(c => /back|rear|environment/i.test(c.label));
+      return backCam ? backCam.id : cameras[cameras.length - 1].id;
+    }
+
+    function populateCameraDropdown(cameras) {
+      const select = document.getElementById("camera-select");
+      select.innerHTML = "";
+      cameras.forEach(cam => {
+        const opt = document.createElement("option");
+        opt.value = cam.id;
+        opt.textContent = cam.label || `Camera (${cam.id.substring(0, 6)})`;
+        select.appendChild(opt);
+      });
+      if (cameras.length > 1) {
+        select.style.display = "inline-block";
+      }
+    }
+
+    function startScanner() {
+      const startBtn = document.getElementById("start-camera");
+      startBtn.style.display = "none";
+      setResult("idle", "Requesting camera permission...");
+      setHint("");
+
+      if (!isSecureContextOk()) {
+        setResult("error", "❌ This page must be opened over HTTPS.");
+        startBtn.style.display = "inline-block";
+        return;
+      }
+
+      Html5Qrcode.getCameras()
+        .then(cameras => {
+          if (!cameras || cameras.length === 0) {
+            setResult("error", "❌ No camera found on this device.");
+            startBtn.style.display = "inline-block";
+            return;
+          }
+
+          availableCameras = cameras;
+          populateCameraDropdown(cameras);
+          currentCameraId = pickDefaultCamera(cameras);
+          document.getElementById("camera-select").value = currentCameraId;
+
+          launchCamera(currentCameraId);
+        })
+        .catch(err => {
+          handleCameraError(err);
+          startBtn.style.display = "inline-block";
+        });
+    }
+
+    function launchCamera(cameraId) {
+      if (!html5QrCode) {
+        html5QrCode = new Html5Qrcode("reader");
+      }
+
+      const config = { fps: 10, qrbox: { width: 250, height: 250 } };
+
+      html5QrCode.start(cameraId, config, onScanSuccess, onScanFailure)
+        .then(() => {
+          setResult("idle", "Point camera at a QR code");
+        })
+        .catch(err => {
+          handleCameraError(err);
+          document.getElementById("start-camera").style.display = "inline-block";
+        });
+    }
+
+    function switchCamera() {
+      const newId = document.getElementById("camera-select").value;
+      if (newId === currentCameraId) return;
+
+      const stopPromise = html5QrCode ? html5QrCode.stop().catch(() => {}) : Promise.resolve();
+      stopPromise.then(() => {
+        currentCameraId = newId;
+        launchCamera(currentCameraId);
+      });
+    }
+
+    function isSecureContextOk() {
+      return window.isSecureContext === true || location.protocol === "https:";
+    }
+
+    function handleCameraError(err) {
+      const msg = (err && err.toString) ? err.toString() : String(err);
+      console.error("Camera error:", err);
+
+      if (/NotAllowedError|Permission denied/i.test(msg)) {
+        setResult("error", "❌ Camera permission denied.");
+        setHint("Check your browser's site settings (padlock icon in the address bar) and allow Camera for this page, then reload and try again.");
+      } else if (/NotFoundError|no camera/i.test(msg)) {
+        setResult("error", "❌ No camera detected.");
+        setHint("Make sure a webcam is connected (PC) or that no other app is using the camera, then try again.");
+      } else if (/NotReadableError/i.test(msg)) {
+        setResult("error", "❌ Camera is busy.");
+        setHint("Another app or browser tab may be using the camera. Close it and try again.");
+      } else {
+        setResult("error", "❌ Camera access failed.");
+        setHint(msg);
+      }
+    }
+  </script>
+</body>
+</html>
